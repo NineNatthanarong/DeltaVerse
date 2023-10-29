@@ -9,31 +9,37 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-let shell;
+const clients = new Set();
 
 wss.on('connection', (ws) => {
     console.log('New client connected');
+    clients.add(ws);
+
+    // Initialize resources for this connection.
+    let shell;
+    let file_name;
 
     ws.on('message', (message) => {
         const { type, data, uid } = JSON.parse(message);
+        file_name = uid;
         switch (type) {
             case 'runCommand':
-                fs.writeFile(uid+'.c', data, (err) => {
+                fs.writeFile(file_name + '.c', data, (err) => {
                     if (err) {
-                        console.error('Error writing to '+uid+'.c:', err);
-                        ws.send(JSON.stringify({ type: 'error', data: 'Error writing to '+uid+'.c' }));
+                        console.error('Error writing to ' + file_name + '.c:', err);
+                        sendToClient(ws, JSON.stringify({ type: 'error', data: 'Error writing to ' + file_name + '.c' }));
                         return;
                     }
 
-                    exec('gcc '+uid+'.c -o output.o', (compileError) => {
+                    exec('gcc ' + file_name + '.c -o ' + file_name + '.o', (compileError, stdout, stderr) => {
                         if (compileError) {
-                            console.error('Error compiling '+uid+'.c:', compileError);
-                            ws.send(JSON.stringify({ type: 'error', data: 'Error compiling '+uid+'.c' }));
+                            console.error('Error compiling ' + file_name + '.c:', compileError);
+                            sendToClient(ws, JSON.stringify({ type: 'error', data: stderr.trim() }));
+                            cleanupFiles(file_name);
                             return;
                         }
 
-                        // Compilation successful, now execute the program
-                        shell = pty.spawn('./output.o', [], {
+                        shell = pty.spawn('./' + file_name + '.o', [], {
                             name: 'xterm-color',
                             cols: 80,
                             rows: 30,
@@ -42,16 +48,22 @@ wss.on('connection', (ws) => {
                         });
 
                         shell.onData(data => {
-                            ws.send(JSON.stringify({ type: 'output', data }));
+                            sendToClient(ws, JSON.stringify({ type: 'output', data }));
+                        });
+
+                        shell.onExit(() => {
+                            cleanupFiles(file_name);
                         });
                     });
                 });
                 break;
+
             case 'sendInput':
                 if (shell) {
                     shell.write(data + '\n');
                 }
                 break;
+
             default:
                 break;
         }
@@ -59,11 +71,21 @@ wss.on('connection', (ws) => {
 
     ws.on('close', () => {
         console.log('Client disconnected');
+        clients.delete(ws);
         if (shell) {
             shell.kill();
         }
     });
 });
+
+function sendToClient(client, message) {
+    client.send(message);
+}
+
+function cleanupFiles(file_name) {
+    exec('rm ' + file_name + '.c');
+    exec('rm ' + file_name + '.o');
+}
 
 server.listen(3000, () => {
     console.log('Listening on *:3000');
